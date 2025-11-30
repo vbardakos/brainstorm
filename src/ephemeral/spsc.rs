@@ -1,30 +1,30 @@
 use std::{
     cell::UnsafeCell,
     mem::MaybeUninit,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicUsize, Ordering}, usize,
 };
 
-const N: usize = 16; // arena size
 
 /// Preallocates memory and attempts to increase
 /// consume/produce efficiency by using an arena
-pub struct EphemeralBuffer<T> {
-    ring: UnsafeCell<[MaybeUninit<T>; N]>,
+/// N:: arena size
+pub struct SPSCEphemeral<T, const N: usize> {
+    bufr: UnsafeCell<[MaybeUninit<T>; N]>,
     head: AtomicUsize, // read index
     tail: AtomicUsize, // write index
 }
 
-impl<T> EphemeralBuffer<T> {
+impl<T, const N: usize> SPSCEphemeral<T, N> {
     pub const fn new() -> Self {
         Self {
-            ring: unsafe { MaybeUninit::uninit().assume_init() },
+            bufr: unsafe { MaybeUninit::uninit().assume_init() },
             head: AtomicUsize::new(0),
             tail: AtomicUsize::new(0),
         }
     }
 }
 
-pub fn sink_value<T>(b: &EphemeralBuffer<T>, val: T) -> Result<(), T> {
+pub fn sink_value<T, const N: usize>(b: &SPSCEphemeral<T, N>, val: T) -> Result<(), T> {
     let head = b.head.load(Ordering::Acquire);
     let tail = b.tail.load(Ordering::Relaxed);
     let next = (tail + 1) % N;
@@ -34,13 +34,13 @@ pub fn sink_value<T>(b: &EphemeralBuffer<T>, val: T) -> Result<(), T> {
         return Err(val);
     }
 
-    unsafe { (*b.ring.get())[tail].as_mut_ptr().write(val) };
+    unsafe { (*b.bufr.get())[tail].as_mut_ptr().write(val) };
     b.tail.store(next, Ordering::Release);
 
     Ok(())
 }
 
-pub fn spit_value<T>(b: &EphemeralBuffer<T>) -> Option<T> {
+pub fn spit_value<T, const N: usize>(b: &SPSCEphemeral<T, N>) -> Option<T> {
     let head = b.head.load(Ordering::Acquire);
     let tail = b.tail.load(Ordering::Relaxed);
     let next = (head + 1) % N;
@@ -50,12 +50,12 @@ pub fn spit_value<T>(b: &EphemeralBuffer<T>) -> Option<T> {
         return None;
     }
 
-    let val = unsafe { (*b.ring.get())[head].as_ptr().read() };
+    let val = unsafe { (*b.bufr.get())[head].as_ptr().read() };
     b.head.store(next, Ordering::Release);
     Some(val)
 }
 
-unsafe impl<T> Sync for EphemeralBuffer<T> {}
+unsafe impl<T> Sync for SPSCEphemeral<T> {}
 
 #[cfg(test)]
 mod test {
@@ -65,7 +65,7 @@ mod test {
 
     #[test]
     fn test_seq_spsc() {
-        let src = EphemeralBuffer::<i32>::new();
+        let src = SPSCEphemeral::<i32>::new();
 
         for i in 0..10000 {
             if sink_value(&src, i).is_ok() {
@@ -79,7 +79,7 @@ mod test {
 
     #[test]
     fn test_threaded_spsc() {
-        let src = Arc::new(EphemeralBuffer::<i32>::new());
+        let src = Arc::new(SPSCEphemeral::<i32>::new());
 
         let producer = src.clone();
         let produce_t = thread::spawn(move || {
